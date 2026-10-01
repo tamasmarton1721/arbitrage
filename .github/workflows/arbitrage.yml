@@ -4,7 +4,7 @@ on:
   schedule:
     # Minden 15. percben fut. A GitHub ennél sűrűbb/pontosabb ütemezést
     # nem garantál (terheléstől függően csúszhat néhány percet).
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}  # lehetővé teszi a kézi indítást is az Actions fülön
 
 permissions:
