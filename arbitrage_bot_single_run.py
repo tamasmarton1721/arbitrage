@@ -13,6 +13,7 @@ a repóba -- így idővel összegyűlik egy elemezhető adatsor.
 import asyncio
 import csv
 import itertools
+import json
 import logging
 import os
 import time
@@ -33,6 +34,9 @@ TEST_AMOUNT = 50.0
 ORDER_BOOK_DEPTH = 20
 MAX_TRIANGLES = 40
 LOG_CSV_PATH = "arbitrage_opportunities.csv"
+BALANCE_FILE = "balance.json"
+TRADES_CSV_PATH = "virtual_trades.csv"
+STARTING_BALANCE = 1000.0  # ennyivel indul a virtuális egyenleg, ha még nincs balance.json
 
 
 @dataclass
@@ -65,7 +69,50 @@ def log_to_csv(opp: Opportunity, above_threshold: bool):
         )
 
 
-def build_triangles(markets: dict, base: str, max_triangles: int):
+def load_balance():
+    """Betölti a virtuális egyenleget a balance.json-ból; ha nem létezik,
+    létrehozza STARTING_BALANCE értékkel."""
+    if os.path.exists(BALANCE_FILE):
+        with open(BALANCE_FILE, "r") as f:
+            data = json.load(f)
+    else:
+        data = {
+            "balance": STARTING_BALANCE,
+            "currency": BASE_CURRENCY,
+            "started_at": now_iso(),
+            "last_updated": now_iso(),
+            "total_trades": 0,
+        }
+    return data
+
+
+def save_balance(data: dict):
+    data["last_updated"] = now_iso()
+    with open(BALANCE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def ensure_trades_csv_header():
+    if not os.path.exists(TRADES_CSV_PATH):
+        with open(TRADES_CSV_PATH, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["timestamp", "path", "trade_amount", "net_multiplier",
+                 "profit_pct", "profit_amount", "balance_before", "balance_after"]
+            )
+
+
+def log_trade(opp: Opportunity, trade_amount: float, balance_before: float, balance_after: float):
+    with open(TRADES_CSV_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [now_iso(), "->".join(opp.path), f"{trade_amount:.4f}", f"{opp.net_multiplier:.6f}",
+             f"{opp.expected_profit_pct:.4f}", f"{balance_after - balance_before:.4f}",
+             f"{balance_before:.4f}", f"{balance_after:.4f}"]
+        )
+
+
+
     active_symbols = {s for s, m in markets.items() if m.get("active", True)}
     direct = set()
     for s in active_symbols:
@@ -203,12 +250,17 @@ async def get_taker_fee(exchange):
 
 async def run_once():
     ensure_csv_header()
+    ensure_trades_csv_header()
+    balance_data = load_balance()
+    balance = balance_data["balance"]
+
     exchange = getattr(ccxt_async, EXCHANGE_ID)({"enableRateLimit": True})
     try:
         markets = await exchange.load_markets()
         taker_fee = await get_taker_fee(exchange)
         triangles = build_triangles(markets, BASE_CURRENCY, MAX_TRIANGLES)
-        log.info("Díj: %.4f%% | Talált hurkok: %d", taker_fee * 100, len(triangles))
+        log.info("Egyenleg: %.4f %s | Díj: %.4f%% | Talált hurkok: %d",
+                  balance, BASE_CURRENCY, taker_fee * 100, len(triangles))
 
         if not triangles:
             log.error("Nem található hurok '%s' bázisból.", BASE_CURRENCY)
@@ -219,19 +271,36 @@ async def run_once():
         order_books = await fetch_all_order_books(exchange, all_symbols)
         log.info("Order bookok lekérve %.2f mp alatt (%d szimbólum).", time.time() - start, len(order_books))
 
-        found_any = False
+        best_opp = None
         for path in triangles:
             opp = evaluate_path(path, order_books, BASE_CURRENCY, taker_fee, TEST_AMOUNT)
             if opp is None:
                 continue
             above = opp.expected_profit_pct / 100 > MIN_PROFIT_THRESHOLD
             log_to_csv(opp, above_threshold=above)
-            if above:
-                found_any = True
-                log.info("LEHETŐSÉG: %s | profit: %.3f%%", " -> ".join(opp.path), opp.expected_profit_pct)
+            if above and (best_opp is None or opp.expected_profit_pct > best_opp.expected_profit_pct):
+                best_opp = opp
 
-        if not found_any:
-            log.info("Ebben a futásban nem volt küszöb feletti lehetőség.")
+        if best_opp:
+            trade_amount = min(balance, TEST_AMOUNT)
+            if trade_amount <= 0:
+                log.warning("Nincs elkölthető egyenleg, kihagyott lehetőség: %s", " -> ".join(best_opp.path))
+            else:
+                profit = trade_amount * (best_opp.net_multiplier - 1)
+                balance_before = balance
+                balance = balance + profit
+                log.info(
+                    "VIRTUÁLIS KÖTÉS: %s | tétel: %.4f | profit: %.3f%% (%.4f) | egyenleg: %.4f -> %.4f",
+                    " -> ".join(best_opp.path), trade_amount, best_opp.expected_profit_pct,
+                    profit, balance_before, balance,
+                )
+                log_trade(best_opp, trade_amount, balance_before, balance)
+                balance_data["total_trades"] = balance_data.get("total_trades", 0) + 1
+        else:
+            log.info("Ebben a futásban nem volt küszöb feletti lehetőség, nincs kötés.")
+
+        balance_data["balance"] = balance
+        save_balance(balance_data)
 
     finally:
         await exchange.close()
