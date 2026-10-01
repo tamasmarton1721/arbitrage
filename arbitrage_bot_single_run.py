@@ -113,6 +113,7 @@ def log_trade(opp: Opportunity, trade_amount: float, balance_before: float, bala
 
 
 
+def build_triangles(markets: dict, base: str, max_triangles: int):
     active_symbols = {s for s, m in markets.items() if m.get("active", True)}
     direct = set()
     for s in active_symbols:
