@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("arbitrage")
 
 DRY_RUN = True
-EXCHANGE_ID = "binance"
+EXCHANGE_ID = "kraken"
 BASE_CURRENCY = "USDT"
 DEFAULT_TAKER_FEE = 0.001
 MIN_PROFIT_THRESHOLD = 0.002
