@@ -28,10 +28,10 @@ jobs:
       - name: Szkenner futtatása
         run: python arbitrage_bot_single_run.py
 
-      - name: CSV visszacommitolása
+      - name: CSV és egyenleg visszacommitolása
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add arbitrage_opportunities.csv
-          git diff --staged --quiet || git commit -m "Arbitrázs log frissítve [skip ci]"
+          git add arbitrage_opportunities.csv balance.json virtual_trades.csv
+          git diff --staged --quiet || git commit -m "Arbitrázs log és egyenleg frissítve [skip ci]"
           git push
