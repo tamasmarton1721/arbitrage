@@ -108,7 +108,8 @@ def walk_book(levels, amount_needed, is_buy):
     remaining = amount_needed
     total_cost = 0.0
     filled = 0.0
-    for price, size in levels:
+    for level in levels:
+        price, size = level[0], level[1]
         take = min(remaining, size)
         total_cost += take * price
         filled += take
