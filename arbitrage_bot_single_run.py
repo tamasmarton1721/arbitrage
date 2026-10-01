@@ -104,21 +104,61 @@ async def fetch_all_order_books(exchange, symbols):
     return {symbol: ob for symbol, ob in results if ob is not None}
 
 
-def walk_book(levels, amount_needed, is_buy):
-    remaining = amount_needed
-    total_cost = 0.0
+def sell_base_get_quote(bids, amount_base):
+    """Eladjuk `amount_base` mennyiségű bázis devizát a bid oldalon; visszaadja
+    (megkapott jegyzett deviza mennyisége, ténylegesen eladott bázis mennyiség)."""
+    remaining = amount_base
+    quote_total = 0.0
     filled = 0.0
-    for level in levels:
+    for level in bids:
         price, size = level[0], level[1]
         take = min(remaining, size)
-        total_cost += take * price
+        quote_total += take * price
         filled += take
         remaining -= take
         if remaining <= 0:
             break
-    if filled == 0:
-        return None, 0.0
-    return total_cost / filled, filled
+    return quote_total, filled
+
+
+def buy_base_with_quote(asks, amount_quote):
+    """Elköltünk `amount_quote` mennyiségű jegyzett devizát az ask oldalon, hogy
+    bázis devizát vegyünk; visszaadja (megkapott bázis mennyiség, elköltött jegyzett
+    deviza mennyiség)."""
+    remaining = amount_quote
+    base_total = 0.0
+    quote_spent = 0.0
+    for level in asks:
+        price, size = level[0], level[1]
+        cost_level = price * size
+        take_quote = min(remaining, cost_level)
+        take_base = take_quote / price
+        base_total += take_base
+        quote_spent += take_quote
+        remaining -= take_quote
+        if remaining <= 0:
+            break
+    return base_total, quote_spent
+
+
+def convert(symbol, order_book, have_currency, amount_have, fee):
+    """Átvált `amount_have` mennyiségű `have_currency` devizát a `symbol` pár
+    (pl. 'BTC/USDT') másik devizájára, a könyv megfelelő oldalát használva.
+    Visszaadja (új deviza, új mennyiség díj levonása után), vagy None-t, ha
+    a pár nem kapcsolódik a birtokolt devizához, vagy üres a könyv."""
+    base, quote = symbol.split("/")
+    if have_currency == base:
+        quote_received, base_filled = sell_base_get_quote(order_book["bids"], amount_have)
+        if base_filled <= 0:
+            return None
+        return quote, quote_received * (1 - fee)
+    elif have_currency == quote:
+        base_received, quote_spent = buy_base_with_quote(order_book["asks"], amount_have)
+        if quote_spent <= 0:
+            return None
+        return base, base_received * (1 - fee)
+    else:
+        return None
 
 
 def evaluate_path(path, order_books, base, taker_fee, test_amount):
@@ -127,29 +167,19 @@ def evaluate_path(path, order_books, base, taker_fee, test_amount):
     if not all([ob1, ob2, ob3]):
         return None
     try:
-        b1, q1 = leg1.split("/")
-        if q1 == base:
-            price, filled = walk_book(ob1["asks"], test_amount / ob1["asks"][0][0], True)
-            amount_x = filled
-        else:
-            price, filled = walk_book(ob1["bids"], test_amount, False)
-            amount_x = filled * price if price else 0
-        if not amount_x:
-            return None
-        amount_x *= (1 - taker_fee)
+        currency = base
+        amount = test_amount
+        for symbol, ob in ((leg1, ob1), (leg2, ob2), (leg3, ob3)):
+            result = convert(symbol, ob, currency, amount, taker_fee)
+            if result is None:
+                return None
+            currency, amount = result
 
-        price2, filled2 = walk_book(ob2["bids"], amount_x, False)
-        if price2 is None:
+        if currency != base:
+            # A hurok nem zárult vissza a bázis devizára -> hibás/nem valódi triangle
             return None
-        amount_y = filled2 * price2 * (1 - taker_fee)
 
-        b3, q3 = leg3.split("/")
-        price3, filled3 = walk_book(ob3["bids"] if b3 != base else ob3["asks"], amount_y, False)
-        if price3 is None:
-            return None
-        final_base = filled3 * price3 * (1 - taker_fee)
-
-        net_multiplier = final_base / test_amount
+        net_multiplier = amount / test_amount
         return Opportunity(
             path=list(path),
             net_multiplier=net_multiplier,
